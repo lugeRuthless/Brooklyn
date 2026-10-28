@@ -6,120 +6,120 @@ paths:
   - ".release-please-manifest.json"
 ---
 
-# リリースフロー詳細
+# 发布流程详情
 
-CLAUDE.md の「CI / リリース」節の補足。`release.yaml` / `.github/workflows/*` / Homebrew Cask 関連を変更する前に必ず読むこと。
+本文是 CLAUDE.md「CI / 发布」一节的补充。修改 `release.yaml`、`.github/workflows/*` 或 Homebrew Cask 相关内容前必须先阅读。
 
-## ジョブ構成
+## 作业构成
 
-`release.yaml` は `main` への push / `workflow_dispatch` で起動する。
+`release.yaml` 在 push 到 `main` 或 `workflow_dispatch` 时启动。
 
 ```
 create-draft-release (ubuntu)
   │  outputs: release_created / tag_name
   ▼
-upload-assets (macos-26)          release_created == 'true' のときだけ
+upload-assets (macos-26)          仅当 release_created == 'true'
   ├── homebrew-update (macos-26)  同上
-  └── release-pr (ubuntu)         upload-assets が失敗したときを除き常に走る
+  └── release-pr (ubuntu)         除 upload-assets 失败外始终运行
 ```
 
-- `create-draft-release`: release-please が conventional commits を集計し、release PR が既にマージされていれば draft release + tag を作成
-- `upload-assets`: XcodeGen + `make build` + `make test` で `Brooklyn.app` (screen saver extension 内蔵) をビルドし、[署名と公証](#署名と公証)を経て `Brooklyn.app.zip` を GitHub Release に upload 後 publish
-- `homebrew-update`: `brew bump-cask-pr` で `nozomiishii/homebrew-tap` の `Casks/brooklyn.rb` を更新する PR を作り、`gh pr merge --auto --squash` で auto-merge を有効化
-- `release-pr`: release-please で次の release PR を作成 / 更新
+- `create-draft-release`：release-please 汇总 conventional commits；若 release PR 已合并，则创建 draft release 和 tag
+- `upload-assets`：用 XcodeGen + `make build` + `make test` 构建内置 screen saver extension 的 `Brooklyn.app`，经[签名与公证](#签名与公证)后，把 `Brooklyn.app.zip` 上传到 GitHub Release 并 publish
+- `homebrew-update`：用 `brew bump-cask-pr` 为 `nozomiishii/homebrew-tap` 的 `Casks/brooklyn.rb` 创建更新 PR，并用 `gh pr merge --auto --squash` 启用 auto-merge
+- `release-pr`：用 release-please 创建或更新下一个 release PR
 
-## 署名と公証
+## 签名与公证
 
-`upload-assets` はビルド後に配布物を仕上げる。ローカルビルド (`make build` / `make install`) は ad-hoc 署名のままで、この処理はリリース CI だけで行う。
+`upload-assets` 在构建后完成分发物。本地构建（`make build` / `make install`）保持 ad-hoc 签名，此处理只在发布 CI 中执行。
 
 ```
-security import      .p12 を一時キーチェーンへ。job 末尾の cleanup step で削除
+security import      把 .p12 导入临时钥匙串。在 job 末尾的 cleanup step 中删除
       ▼
-codesign             inside-out に署名
-      │                先に BrooklynExtension.appex
-      │                次に Brooklyn.app
+codesign             由内向外签名
+      │                先签 BrooklynExtension.appex
+      │                再签 Brooklyn.app
       ▼
-codesign --verify    --deep でネスト込みに検証。appex の署名から
-      │                app-sandbox が落ちていたら fail
+codesign --verify    用 --deep 验证包含嵌套内容。若 appex 签名中
+      │                app-sandbox 缺失则 fail
       ▼
-notarytool submit    ditto で固めた zip を提出。Accepted 以外なら
-      │                notarytool log を出力して fail
+notarytool submit    提交用 ditto 打好的 zip。结果不是 Accepted 时
+      │                输出 notarytool log 并 fail
       ▼
-stapler staple       チケットをバンドルに貼付
+stapler staple       把票据钉到 bundle 上
       ▼
-ditto                staple 済みバンドルを配布用 zip に固め直す
+ditto                把已 staple 的 bundle 重新打成用于分发的 zip
 ```
 
-`codesign` は `--force --options runtime --timestamp` で呼ぶ。hardened runtime を有効にする `--options runtime` と `--timestamp` は、どちらも公証の必須要件。
+`codesign` 使用 `--force --options runtime --timestamp` 调用。启用 hardened runtime 的 `--options runtime` 和 `--timestamp` 都是公证的必要要求。
 
-`--force` は既存の entitlements を落とすため、appex には `--entitlements` で BrooklynExtension/BrooklynExtension.entitlements を渡し直す。app 側は entitlements 無し。
+`--force` 会丢掉已有的 entitlements，因此 appex 要用 `--entitlements` 重新传入 BrooklynExtension/BrooklynExtension.entitlements。app 侧不带 entitlements。
 
-署名 identity は一時キーチェーンから自動検出する。1Password に identity 文字列は持たない。
+签名 identity 从临时钥匙串自动检测。1Password 中不保存 identity 字符串。
 
-提出用 zip は使い捨てで、配布物は Package step が staple 済みバンドルから作り直す。
+提交用的 zip 是一次性的，分发物由 Package step 从已 staple 的 bundle 重新制作。
 
-キーチェーン import は [GitHub 公式手順](https://docs.github.com/ja/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)に準拠する。変えたのは次の 4 点。
+钥匙串 import 遵循 [GitHub 官方步骤](https://docs.github.com/zh/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)。改动了以下 4 点。
 
-- キーチェーンパスワードは secret にせず `openssl rand` で実行ごとに生成する。job の中でしか使わない値なので、長命の secret を増やさない
-- provisioning profile の step はない。Developer ID 直接配布では使わない
-- `.p12` ファイルは import 直後に削除する
-- cleanup は公式手順だと self-hosted runner のみ必要とされるが、防御的に常に実行する
+- 钥匙串密码不放入 secret，每次执行用 `openssl rand` 生成。该值只在 job 内使用，因此不增加长期 secret
+- 没有 provisioning profile 步骤。Developer ID 直接分发不使用它
+- `.p12` 文件在 import 后立即删除
+- 官方步骤只要求 self-hosted runner 做 cleanup，这里出于防御始终执行
 
 ### 1Password vault `apple-developer`
 
-Apple の鍵は共有の `nozomiishii-ci` vault ではなく専用 vault に置く。vault の切り方は「同じ場所に配る鍵は同じ vault」を基準にする。
+Apple 的密钥放在专用 vault，不放在共享的 `nozomiishii-ci` vault。划分 vault 的标准是「发到同一处的密钥放在同一个 vault」。
 
-- service account は repo ごとに 1 つ (Brooklyn 用は「Brooklyn」)。`apple-developer` vault を読めるのは Brooklyn の service account だけにし、他リポジトリの CI が侵害されても署名鍵に届かないようにする
-- 1Password の service account は作成後に vault の追加・権限変更ができない ([公式](https://www.1password.dev/service-accounts/manage-service-accounts/))。アクセスする vault を増やすときは service account を作り直し、`OP_SERVICE_ACCOUNT_TOKEN` の値を新トークンに差し替える
-- 鍵が漏れた・漏れた疑いがある場合は、この vault の全アイテムをローテーションする
+- 每个仓库一个 service account（Brooklyn 用的是「Brooklyn」）。只有 Brooklyn 的 service account 能读取 `apple-developer` vault，这样其他仓库的 CI 被入侵时也接触不到签名密钥
+- 1Password 的 service account 创建后不能追加 vault 或更改权限（[官方说明](https://www.1password.dev/service-accounts/manage-service-accounts/)）。需要增加可访问的 vault 时，重新创建 service account，并把 `OP_SERVICE_ACCOUNT_TOKEN` 换成新 token
+- 密钥泄露或疑似泄露时，轮换该 vault 中的全部 item
 
-| item | フィールド | 内容 |
+| item | 字段 | 内容 |
 | --- | --- | --- |
-| `developer-id` | `certificate-p12` | Developer ID Application 証明書 + 秘密鍵の .p12 を base64 化した文字列 |
-| `developer-id` | `p12-password` | .p12 エクスポート時に設定したパスワード |
-| `app-store-connect` | `key-id` | App Store Connect API キーの Key ID |
-| `app-store-connect` | `issuer-id` | App Store Connect API の Issuer ID |
-| `app-store-connect` | `private-key` | API キー .p8 を base64 化した文字列。改行を含む PEM をフィールドで壊さず保持するため |
+| `developer-id` | `certificate-p12` | Developer ID Application 证书与私钥的 .p12，经 base64 编码的字符串 |
+| `developer-id` | `p12-password` | 导出 .p12 时设置的密码 |
+| `app-store-connect` | `key-id` | App Store Connect API 密钥的 Key ID |
+| `app-store-connect` | `issuer-id` | App Store Connect API 的 Issuer ID |
+| `app-store-connect` | `private-key` | API 密钥 .p8 经 base64 编码的字符串。字段中保留含换行的 PEM，避免被破坏 |
 
-### 鍵の更新
+### 密钥更新
 
-- Developer ID Application 証明書は有効期限 5 年。期限が切れたら Xcode → Settings → Accounts → Manage Certificates で作り直し、Keychain Access から .p12 を書き出して `certificate-p12` / `p12-password` を更新する。署名 identity は workflow がキーチェーンから自動検出するため identity 文字列の登録は不要
-- 公証済みの配布物は証明書が失効しても有効なまま。staple されたチケットで検証される
-- App Store Connect API キーに期限はないが、revoke したら `app-store-connect` item の `key-id` / `private-key` を差し替える
+- Developer ID Application 证书有效期为 5 年。过期后在 Xcode → Settings → Accounts → Manage Certificates 中重新创建，从 Keychain Access 导出 .p12，并更新 `certificate-p12` / `p12-password`。签名 identity 由 workflow 从钥匙串自动检测，无需登记 identity 字符串
+- 已公证的分发物在证书失效后仍然有效，由已 staple 的票据验证
+- App Store Connect API 密钥没有期限，但 revoke 后要替换 `app-store-connect` item 的 `key-id` / `private-key`
 
-## Homebrew Cask 更新の実装方針
+## Homebrew Cask 更新的实现方针
 
-`homebrew-update` は Homebrew 公式 CLI `brew bump-cask-pr` を直接呼ぶ。
+`homebrew-update` 直接调用 Homebrew 官方 CLI `brew bump-cask-pr`。
 
-| 手段 | 採否 |
+| 手段 | 取舍 |
 | --- | --- |
-| `brew bump-cask-pr` | 採用。公式 [Autobump](https://docs.brew.sh/Autobump) でも使われている本流 |
-| Renovate に任せる | `homebrew` manager は Formula のみ対応で Cask 未サポート。[要望の issue](https://github.com/renovatebot/renovate/discussions/32965) は open のままコメント 0。`postUpgradeTasks` で sha256 を再計算する手は Mend Cloud では使えない |
-| `mislav/bump-homebrew-formula-action` | サイレント失敗する。下に詳しく書いた |
-| 手書き `git push` + `gh pr create` | 動くが Homebrew エコシステム非標準 |
+| `brew bump-cask-pr` | 采用。官方 [Autobump](https://docs.brew.sh/Autobump) 也使用这条主流路径 |
+| 交给 Renovate | `homebrew` manager 只支持 Formula，不支持 Cask。[相关讨论](https://github.com/renovatebot/renovate/discussions/32965) 仍为 open，评论数为 0。用 `postUpgradeTasks` 重算 sha256 的做法在 Mend Cloud 上不可用 |
+| `mislav/bump-homebrew-formula-action` | 会静默失败。详见下文 |
+| 手写 `git push` + `gh pr create` | 能工作，但不符合 Homebrew 生态的常规做法 |
 
-`brew bump-cask-pr` が肩代わりするのは次の 4 つ。
+`brew bump-cask-pr` 代为完成以下 4 项。
 
-- 新版 tarball を取得して `sha256` を自動再計算
-- `Casks/brooklyn.rb` のフィールド単位更新
-- API 経由で commit + PR 作成。重複 PR 検出も内蔵
-- `brew style` での文法検証
+- 获取新版 tarball 并自动重算 `sha256`
+- 按字段更新 `Casks/brooklyn.rb`
+- 通过 API 创建 commit 和 PR，并内置重复 PR 检测
+- 用 `brew style` 做语法校验
 
-### `mislav/bump-homebrew-formula-action` のサイレント失敗
+### `mislav/bump-homebrew-formula-action` 的静默失败
 
-`homebrew-tap` の `main` は GitHub Rulesets で保護されている。この action は `branchRes.data.protected === true` を見て、`update-<file>-<timestamp>` という別ブランチに commit を作る経路へ入る。`create-pullrequest: false` のままだと PR 化もマージもされず、孤立ブランチだけが残る。
+`homebrew-tap` 的 `main` 受 GitHub Rulesets 保护。该 action 看到 `branchRes.data.protected === true` 后，会走到在 `update-<file>-<timestamp>` 这个其他分支上创建 commit 的路径。若保持 `create-pullrequest: false`，则既不会变成 PR 也不会合并，只留下孤立分支。
 
-ジョブは success で終わるため気付けない。実例として `update-git-harvest.rb-1777372050` が放置されていた。
+作业以 success 结束，因此不易察觉。实例是被搁置的 `update-git-harvest.rb-1777372050`。
 
-## runner 選定
+## runner 选择
 
-`homebrew-update` は macos-26 で動かし、runner を `upload-assets` と統一する。macOS runner なら `brew` がプリインストールされているので setup ステップごと不要になる。
+`homebrew-update` 在 macos-26 上运行，与 `upload-assets` 使用同一 runner。macOS runner 已预装 `brew`，因此不需要 setup 步骤。
 
-Linux runner + `Homebrew/actions/setup-homebrew` も試したが、`Homebrew/actions` が monorepo で個別 tag を持たないため zizmor の `stale-action-refs` に引っかかり、commit pin しても警告が出続ける。
+也曾试过 Linux runner 加 `Homebrew/actions/setup-homebrew`。`Homebrew/actions` 是 monorepo，没有单独的 tag，会触发 zizmor 的 `stale-action-refs`；即使 pin 到 commit，警告也会继续出现。
 
-## 周辺前提
+## 周边前提
 
-- GitHub App `nozomiishii-ci` に `homebrew-tap` への `contents: write` + `pull-requests: write` 権限が付与済み
-- `homebrew-tap` で `allow_auto_merge: true` 有効化済み
-- `homebrew-tap` の `main` は GitHub Rulesets で 4 つの required status checks (`pull-request / validate`, `github-actions / required`, `secret-scan / secretlint`, `GitGuardian Security Checks`) を要求
-- これらが pass 後 GitHub auto-merge で `brew bump-cask-pr` が作成した PR が自動 squash merge される
+- GitHub App `nozomiishii-ci` 已获得 `homebrew-tap` 的 `contents: write` 与 `pull-requests: write` 权限
+- `homebrew-tap` 已启用 `allow_auto_merge: true`
+- `homebrew-tap` 的 `main` 由 GitHub Rulesets 要求 4 个 required status checks（`pull-request / validate`、`github-actions / required`、`secret-scan / secretlint`、`GitGuardian Security Checks`）
+- 这些检查通过后，GitHub auto-merge 会自动 squash merge 由 `brew bump-cask-pr` 创建的 PR
